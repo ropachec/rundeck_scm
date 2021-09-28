@@ -1,0 +1,155 @@
+#!/bin/bash
+
+# Script para commit automatico dos jobs do Rundeck no git
+# Criação das configurações de SCM para o projeto, se não existir
+# Criado por: Rogerio Pacheco
+# Criado em: 28/09/2021
+
+# Definindo variaveis de ambiente
+
+export RD_URL="http://rundeckserver:4440/"
+export RDECK_BASE="/rundeck"
+export JAVA_HOME="${RDECK_BASE}/binarios/current_java"
+export RDCLI="${RDECK_BASE}/binarios/rd_cli"
+export RD_TOKEN="TOKENCRIADORUNDECK"
+export DATA=`date "+%d/%m/%Y"`
+export HORA=`date "+%H:%M"`
+export JSONTEMP="config.json.template"
+export PATH="${PATH}:/${JAVA_HOME}/bin"
+
+# Definindo variaveis para o rdcli e projetos
+
+rd="java -jar ${RDCLI}/rundeck-cli-1.3.10-all.jar"
+project_list=`${rd} projects list | awk 'NR>1&&NF{print}'`
+ERROR=0
+
+# Função para validar a execução do ultimo comando
+# Define as mensagens e codigos de saida para o Rundeck.
+
+func_VALIDAEXEC(){
+
+	RESULT=$?
+	ATIV=$1
+	PROJ_NAME=$2
+
+	if [ ${RESULT} -ne 0 ];then
+
+		echo "[ ERROR ] Falha ao realizar a atividade: ${ATIV} para o projeto: ${PROJ_NAME}"
+		(( ERROR ++ ))
+
+	else
+		echo "[ SUCCESS ] Atividade realizada com sucesso ${ATIV} para o projeto ${PROJ_NAME}"
+	fi
+}
+
+# Recebe os projetos listados pela variavel project_list
+# Verifica a saida do scm status a fim de identificar qual projeto tem job passivel de commit
+# A partir da lista de projetos com pendência de commit, lista os uuids dos jobs
+# Executa o comando para export dos jobs para o git e seu respectivo commit
+# Executa o push dos jobs commitados
+
+# Caso a variavel ${valida_commit} seja nula - entende que o scm não está configurado
+# copia o template do json gerado anteriormente pelo comando
+# rd projects scm config -p NOMEPROJETO --file config.json --integration export
+# O arquivo foi pré ajustado de forma que todos os locais com nome do projeto recebem o valor: PROJECTNAME
+# Para todos os repositorios ficou definida a mesma private key, criada anteriormente no projeto que gera o template
+# O nome do arquivo para template ficou: config.json.template
+
+# Realiza a copia do arquivo de template para um arquivo do projeto
+# Realiza a troca dos nomes de: PROJECTNAME para o nome do projeto em si
+# Inicia o setup passando o nome do projeto, arquivo json, tipo de integração e tipo de plugin.
+# Tipo de integração pode receber export ou import
+# tipo de plugin pode receber git-export ou git-import
+
+func_COMMITUPDATE(){
+
+	${rd} projects scm perform --project ${projects} \
+        --integration export \
+        --action project-commit \
+        --job ${jobs_uids} \
+        --allmodified \
+        --field message="Commit automático Rundeck em: ${DATA} as ${HORA}"
+
+}
+
+func_COMMITDELTE(){
+
+	${rd} projects scm perform --project ${projects} \
+	--integration export \
+	--action project-commit \
+	--alldeleted \
+	--field message="Commit de Remoção automático Rundeck em: ${DATA} as ${HORA}"
+
+
+}
+
+func_PUSH(){
+
+	${rd} projects scm perform --project ${projects} \
+        --integration export \
+        --action project-push
+
+}
+
+func_CRIASCM(){
+
+	TYPEI=$1
+	TYPE=$2
+	${rd} projects scm setup --project ${projects} \
+        --file ${RDECK_BASE}/bin/config_${proj_pathname}.json \
+        --integration ${TYPE} \
+        --type "${TYPE}"	
+
+}
+
+func_TRATAJSON(){
+
+	proj_pathname=`echo ${projects} | sed 's/ /_/g'`
+        cp ${RDECK_BASE}/bin/${JSONTEMP} ${RDECK_BASE}/bin/config_${proj_pathname}.json
+        sed -i 's/PROJECTNAME/'${projects}'/g' ${RDECK_BASE}/bin/config_${proj_pathname}.jso
+
+}
+
+for projects in ${project_list};do
+	
+	valida_commit=`${rd} projects scm status --project ${projects} --integration export | awk -F ": " '/synchState/{print $NF}'`
+	
+	if [ "${valida_commit}" = "EXPORT_NEEDED" ];then
+
+		jobs_uids=`${rd} jobs list --project ${projects} --outformat "%id"  | xargs`
+		count_jobs=`echo ${jobs_uids} | awk '/No jobs were selected/{print NR}'`
+
+		if [ -n "${count_jobs}" ];then
+
+			func_COMMITUPDATE
+			func_VALIDAEXEC "Commit dos Jobs" "${projects}"
+		else
+
+			func_COMMITDELTE
+			func_VALIDAEXEC "Commit dos Jobs de Remoção" "${projects}"
+		fi
+
+		func_PUSH
+		func_VALIDAEXEC "Push para o GIT"
+
+	elif [ -z "${valida_commit}" ];then
+	
+		func_TRATAJSON
+		func_CRIASCM "export" "git-export"
+		func_VALIDAEXEC "Setup do SCM"
+	
+	else
+
+		echo "[ INFO ] Nenhuma ação para o projeto: ${projects}. Nenhum Jobs a ser commitado ou SCM a ser configurado"
+	fi
+done
+
+if [ ${ERROR} -gt 0 ];then
+
+	exit 1
+
+else
+
+	exit 0
+
+fi
